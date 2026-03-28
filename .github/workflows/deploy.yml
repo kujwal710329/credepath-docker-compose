@@ -88,8 +88,12 @@ jobs:
             IMAGE_TAG="${{ steps.target.outputs.image_tag }}"
             DEPLOY_DIR=~/credepath-docker-compose
 
-            # ── 1. Pull latest code ────────────────────────────────────────────
-            echo "==> Updating repo [branch: ${DEPLOY_BRANCH}]..."
+            # ── 1. Clone repo if missing, otherwise pull latest code ──────────
+            echo "==> Syncing repo [branch: ${DEPLOY_BRANCH}]..."
+            if [ ! -d "${DEPLOY_DIR}/.git" ]; then
+              echo "==> Repo not found — cloning..."
+              git clone git@github.com:kujwal710329/credepath-docker-compose.git "${DEPLOY_DIR}"
+            fi
             cd "${DEPLOY_DIR}"
             git fetch origin
             git checkout "${DEPLOY_BRANCH}"
