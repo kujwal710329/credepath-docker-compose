@@ -1,0 +1,127 @@
+name: Deploy
+
+# Triggers:
+#   push to develop-1.0.0  → staging EC2   (auto)
+#   push to main            → production EC2 (auto)
+#   workflow_dispatch       → choose staging or production manually
+#
+# Environment-specific config (bucket names, NODE_ENV, etc.) lives in deploy.sh.
+# Secrets are scoped per GitHub Environment (staging / production) — same names,
+# different values: EC2_HOST, EC2_USER, EC2_SSH_KEY, MONGODB_URI, JWT_SECRET,
+# SENDGRID_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, OPENAI_API_KEY,
+# PINECONE_API_KEY, NEXT_PUBLIC_API_BASE_URL
+
+on:
+  push:
+    branches:
+      - develop-1.0.0  # → staging environment
+      - main           # → production environment
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: 'ECR image tag (e.g. latest, v1.2.0)'
+        required: false
+        default: 'latest'
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}"
+    runs-on: ubuntu-latest
+
+    # Secrets auto-resolve from the active GitHub Environment.
+    # push to main → 'production', push to develop-1.0.0 → 'staging'.
+    environment: ${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Resolve branch and image tag ─────────────────────────────────────────
+      - name: Resolve target
+        id: target
+        run: |
+          ENV="${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}"
+
+          [ "$ENV" == "production" ] \
+            && echo "deploy_branch=main" >> $GITHUB_OUTPUT \
+            || echo "deploy_branch=develop-1.0.0" >> $GITHUB_OUTPUT
+
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "image_tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+
+      # ── Deploy via SSH ────────────────────────────────────────────────────────
+      # Secrets arrive as shell env vars via appleboy envs: — values are
+      # shell-escaped by the action, safe for special characters.
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          MONGODB_URI:            ${{ secrets.MONGODB_URI }}
+          JWT_SECRET:             ${{ secrets.JWT_SECRET }}
+          SENDGRID_API_KEY:       ${{ secrets.SENDGRID_API_KEY }}
+          AWS_ACCESS_KEY_ID:      ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          OPENAI_API_KEY:         ${{ secrets.OPENAI_API_KEY }}
+          PINECONE_API_KEY:       ${{ secrets.PINECONE_API_KEY }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL }}
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          envs: MONGODB_URI,JWT_SECRET,SENDGRID_API_KEY,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,OPENAI_API_KEY,PINECONE_API_KEY,NEXT_PUBLIC_API_BASE_URL
+          script: |
+            set -e
+
+            DEPLOY_BRANCH="${{ steps.target.outputs.deploy_branch }}"
+            DEPLOY_ENV="${{ steps.target.outputs.environment }}"
+            IMAGE_TAG="${{ steps.target.outputs.image_tag }}"
+            DEPLOY_DIR=~/credepath-docker-compose
+
+            # ── 1. Pull latest code ────────────────────────────────────────────
+            echo "==> Updating repo [branch: ${DEPLOY_BRANCH}]..."
+            cd "${DEPLOY_DIR}"
+            git fetch origin
+            git checkout "${DEPLOY_BRANCH}"
+            git pull origin "${DEPLOY_BRANCH}"
+
+            # ── 2. Write secrets ───────────────────────────────────────────────
+            echo "==> Writing secrets..."
+            printf '%s\n' \
+              "MONGODB_URI=${MONGODB_URI}" \
+              "JWT_SECRET=${JWT_SECRET}" \
+              "SENDGRID_API_KEY=${SENDGRID_API_KEY}" \
+              "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" \
+              "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" \
+              "OPENAI_API_KEY=${OPENAI_API_KEY}" \
+              "PINECONE_API_KEY=${PINECONE_API_KEY}" \
+              > "${DEPLOY_DIR}/.env.secrets"
+            chmod 600 "${DEPLOY_DIR}/.env.secrets"
+
+            # ── 3. Run deploy.sh (handles env config + ECR + docker compose) ──
+            echo "==> Running deploy.sh..."
+            NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL}" \
+              bash "${DEPLOY_DIR}/deploy.sh" "${DEPLOY_ENV}" "${IMAGE_TAG}"
+
+      # ── Summary ───────────────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          echo "### Deploy Complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | \`${{ steps.target.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch**      | \`${{ steps.target.outputs.deploy_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image tag**   | \`${{ steps.target.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **EC2 host**    | \`${{ secrets.EC2_HOST }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by**| \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit**      | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

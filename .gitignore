@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+!.env.config
+!.env.deploy.example
+*.log
+logs/
+*.pem
+.ssh

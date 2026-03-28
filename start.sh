@@ -1,0 +1,286 @@
+#!/bin/bash
+# start.sh — Launcher for Credepath (dev / staging / prod)
+#
+# BEFORE RUNNING — export required env vars in your terminal:
+#
+#   # App secrets (required for all environments)
+#   export MONGODB_URI="mongodb+srv://..."
+#   export JWT_SECRET="your-secret"
+#   export AWS_ACCESS_KEY_ID="AKIA..."
+#   export AWS_SECRET_ACCESS_KEY="..."
+#   export SENDGRID_API_KEY="SG...."       # optional
+#   export OPENAI_API_KEY="sk-proj-..."    # optional
+#   export PINECONE_API_KEY="pcsk_..."     # optional
+#
+#   # EC2 connection (required for staging / prod)
+#   export EC2_HOST="1.2.3.4"
+#   export EC2_USER="ubuntu"
+#   export EC2_SSH_KEY="/path/to/key.pem"
+#
+# For staging/prod, GitHub Actions uses GitHub Environment secrets instead.
+
+set -e
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+ask()    { read -p "  $1 [${2}]: " _v; echo "${_v:-$2}"; }
+section(){ echo ""; echo "── $1 ──────────────────────────────────────────────"; }
+ok()     { echo "  ✓ $1"; }
+err()    { echo ""; echo "  ✗ ERROR: $1"; echo ""; exit 1; }
+hr()     { echo "────────────────────────────────────────────────────────────"; }
+
+echo ""
+echo "╔══════════════════════════════════════════════╗"
+echo "║       Credepath Docker Environment Setup     ║"
+echo "╚══════════════════════════════════════════════╝"
+
+# ── Pre-flight ────────────────────────────────────────────────────────────────
+section "Checking requirements"
+docker info > /dev/null 2>&1        && ok "Docker is running"       || err "Docker is not running."
+docker compose version > /dev/null 2>&1 && ok "Docker Compose available" || err "Docker Compose not found."
+
+# ── Validate required app secrets are exported ────────────────────────────────
+section "Checking exported secrets"
+
+MISSING=()
+[ -z "${MONGODB_URI:-}"           ] && MISSING+=("MONGODB_URI")
+[ -z "${JWT_SECRET:-}"            ] && MISSING+=("JWT_SECRET")
+[ -z "${AWS_ACCESS_KEY_ID:-}"     ] && MISSING+=("AWS_ACCESS_KEY_ID")
+[ -z "${AWS_SECRET_ACCESS_KEY:-}" ] && MISSING+=("AWS_SECRET_ACCESS_KEY")
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo ""
+  echo "  Missing required env vars. Export them in your terminal first:"
+  echo ""
+  for v in "${MISSING[@]}"; do
+    echo "    export ${v}=\"...\""
+  done
+  echo ""
+  echo "  Optional (export if needed):"
+  echo "    export SENDGRID_API_KEY=\"...\""
+  echo "    export OPENAI_API_KEY=\"...\""
+  echo "    export PINECONE_API_KEY=\"...\""
+  echo ""
+  exit 1
+fi
+
+ok "MONGODB_URI"
+ok "JWT_SECRET"
+ok "AWS_ACCESS_KEY_ID"
+ok "AWS_SECRET_ACCESS_KEY"
+[ -n "${SENDGRID_API_KEY:-}" ] && ok "SENDGRID_API_KEY"
+[ -n "${OPENAI_API_KEY:-}"   ] && ok "OPENAI_API_KEY"
+[ -n "${PINECONE_API_KEY:-}" ] && ok "PINECONE_API_KEY"
+
+# ── Step 1: Environment ───────────────────────────────────────────────────────
+section "Step 1 — Choose environment"
+echo "  1) dev      — local machine (build from source or ECR images)"
+echo "  2) staging  — staging EC2 via SSH"
+echo "  3) prod     — production EC2 via SSH"
+echo ""
+read -p "  Choose [1]: " ENV_CHOICE
+ENV_CHOICE="${ENV_CHOICE:-1}"
+
+case "$ENV_CHOICE" in
+  1) TARGET_ENV="dev"     ;;
+  2) TARGET_ENV="staging" ;;
+  3) TARGET_ENV="prod"    ;;
+  *) err "Invalid choice.";;
+esac
+ok "Target: ${TARGET_ENV}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEV — local docker compose
+# ══════════════════════════════════════════════════════════════════════════════
+if [ "$TARGET_ENV" == "dev" ]; then
+
+  # ── Config ───────────────────────────────────────────────────────────────────
+  section "Step 2 — Configuration (Enter to accept defaults)"
+  echo ""
+
+  FRONTEND_PORT=$(ask "FRONTEND_PORT"            "3000")
+  BACKEND_PORT=$(ask  "BACKEND_PORT"             "5000")
+  ML_PORT=$(ask       "ML_SERVICE_PORT"          "8000")
+  API_URL=$(ask       "NEXT_PUBLIC_API_BASE_URL" "http://localhost:${BACKEND_PORT}/api/v1")
+  AWS_REGION=$(ask    "AWS_REGION"               "ap-south-1")
+  BUCKET=$(ask        "AWS_BUCKET_NAME"          "credepath-dev")
+  PINECONE_IDX=$(ask  "PINECONE_INDEX_NAME"      "acrapath-job-recommendations-dev")
+  SKIP_CHECK=$(ask    "SKIP_API_KEY_CHECK"       "true")
+  IMAGE_TAG=$(ask     "IMAGE_TAG"                "latest")
+
+  S3_URL="https://${BUCKET}.s3.${AWS_REGION}.amazonaws.com"
+  ok "NEXT_PUBLIC_S3_BASE_URL auto-set: ${S3_URL}"
+
+  # Write .env.config from answers
+  cat > .env.config << EOCONFIG
+# Generated by start.sh (dev) — $(date)
+ECR_REGISTRY=329103132150.dkr.ecr.ap-south-1.amazonaws.com
+IMAGE_TAG=${IMAGE_TAG}
+NODE_ENV=development
+FRONTEND_PORT=${FRONTEND_PORT}
+BACKEND_PORT=${BACKEND_PORT}
+ML_SERVICE_PORT=${ML_PORT}
+PORT=${BACKEND_PORT}
+JWT_EXPIRES_IN=90d
+SENDER_EMAIL=ujjwal@acrapath.com
+AWS_REGION=${AWS_REGION}
+AWS_BUCKET_NAME=${BUCKET}
+PINECONE_ENV=us-east-1
+PINECONE_INDEX_NAME=${PINECONE_IDX}
+SKIP_API_KEY_CHECK=${SKIP_CHECK}
+ML_API_HOST=0.0.0.0
+ML_API_PORT=${ML_PORT}
+JOB_RECOMMENDER_API_URL=http://jobs-recommender:8000
+NEXT_PUBLIC_API_BASE_URL=${API_URL}
+NEXT_PUBLIC_S3_BASE_URL=${S3_URL}
+EOCONFIG
+  ok ".env.config written"
+
+  # ── Run mode ──────────────────────────────────────────────────────────────────
+  section "Step 3 — Run mode"
+  echo "  1) dev      — build from source, hot reload (default)"
+  echo "  2) image    — pull ECR images"
+  echo ""
+  read -p "  Choose [1]: " MODE_CHOICE
+  MODE_CHOICE="${MODE_CHOICE:-1}"
+
+  if [ "$MODE_CHOICE" == "2" ]; then
+    COMPOSE_FILE="docker-compose.yml"
+    echo ""
+    echo "  Logging in to ECR..."
+    aws ecr get-login-password --region "${AWS_REGION}" | \
+      docker login --username AWS --password-stdin \
+        "$(grep '^ECR_REGISTRY=' .env.config | cut -d= -f2 | xargs)"
+    ok "ECR login successful"
+  else
+    COMPOSE_FILE="docker-compose-dev.yml"
+    ok "Using source build (hot reload)"
+  fi
+
+  # ── Action ────────────────────────────────────────────────────────────────────
+  section "Step 4 — Action"
+  echo "  1) Start           (default)"
+  echo "  2) Rebuild & start"
+  echo "  3) Stop"
+  echo "  4) View logs"
+  echo ""
+  read -p "  Choose [1]: " ACTION
+  ACTION="${ACTION:-1}"
+
+  BASE_CMD="docker compose --env-file .env.config -f ${COMPOSE_FILE}"
+  echo ""
+
+  case "$ACTION" in
+    2) echo "  Rebuilding..."; $BASE_CMD up -d --build ;;
+    3) echo "  Stopping...";   $BASE_CMD down; ok "Stopped"; exit 0 ;;
+    4) $BASE_CMD logs -f; exit 0 ;;
+    *) echo "  Starting...";   $BASE_CMD up -d ;;
+  esac
+
+  sleep 3; $BASE_CMD ps
+  echo ""
+  hr
+  echo "  Frontend:   http://localhost:${FRONTEND_PORT}"
+  echo "  Backend:    http://localhost:${BACKEND_PORT}"
+  echo "  ML Service: http://localhost:${ML_PORT}"
+  echo ""
+  echo "  Logs:  ${BASE_CMD} logs -f"
+  echo "  Stop:  ${BASE_CMD} down"
+  hr
+  exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGING / PROD — SSH deploy to EC2
+# ══════════════════════════════════════════════════════════════════════════════
+
+if [ "$TARGET_ENV" == "staging" ]; then
+  DEPLOY_ENV="staging"
+  DEPLOY_BRANCH="develop-1.0.0"
+else
+  DEPLOY_ENV="production"
+  DEPLOY_BRANCH="main"
+  echo ""
+  echo "  ⚠  You are deploying to PRODUCTION."
+  read -p "  Type 'yes' to confirm: " CONFIRM
+  [ "$CONFIRM" != "yes" ] && { echo "  Aborted."; exit 0; }
+fi
+
+# ── Validate EC2 connection vars ───────────────────────────────────────────────
+section "Step 2 — EC2 connection"
+
+EC2_MISSING=()
+[ -z "${EC2_HOST:-}"    ] && EC2_MISSING+=("EC2_HOST")
+[ -z "${EC2_SSH_KEY:-}" ] && EC2_MISSING+=("EC2_SSH_KEY")
+
+if [ ${#EC2_MISSING[@]} -gt 0 ]; then
+  echo ""
+  echo "  Missing EC2 connection vars. Export them first:"
+  echo ""
+  echo "    export EC2_HOST=\"your-ec2-ip\""
+  echo "    export EC2_USER=\"ubuntu\""
+  echo "    export EC2_SSH_KEY=\"/path/to/key.pem\""
+  echo ""
+  exit 1
+fi
+
+SSH_HOST="${EC2_HOST}"
+SSH_USER="${EC2_USER:-ubuntu}"
+SSH_KEY="${EC2_SSH_KEY/#\~/$HOME}"   # expand ~ if present
+
+[ -f "$SSH_KEY" ] || err "SSH key not found at: ${SSH_KEY}"
+
+ok "EC2_HOST:    ${SSH_HOST}"
+ok "EC2_USER:    ${SSH_USER}"
+ok "EC2_SSH_KEY: ${SSH_KEY}"
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+section "Step 3 — Deployment config"
+echo ""
+
+IMAGE_TAG=$(ask "IMAGE_TAG" "latest")
+PUBLIC_API_URL="${NEXT_PUBLIC_API_BASE_URL:-}"
+if [ -z "$PUBLIC_API_URL" ]; then
+  PUBLIC_API_URL=$(ask "NEXT_PUBLIC_API_BASE_URL" "http://${SSH_HOST}/api/v1")
+else
+  ok "NEXT_PUBLIC_API_BASE_URL from env: ${PUBLIC_API_URL}"
+fi
+
+# ── Deploy ─────────────────────────────────────────────────────────────────────
+section "Step 4 — Deploying to ${DEPLOY_ENV}"
+SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=15"
+
+# 1. Pull latest code on EC2
+echo ""
+echo "  [1/3] Pulling latest code (branch: ${DEPLOY_BRANCH})..."
+ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "
+  set -e
+  cd ~/credepath-docker-compose
+  git fetch origin
+  git checkout ${DEPLOY_BRANCH}
+  git pull origin ${DEPLOY_BRANCH}
+"
+ok "Repo updated"
+
+# 2. Write secrets to EC2 via SSH pipe (never stored locally as a file)
+echo "  [2/3] Writing secrets to EC2..."
+{
+  printf 'MONGODB_URI=%s\n'           "${MONGODB_URI}"
+  printf 'JWT_SECRET=%s\n'            "${JWT_SECRET}"
+  printf 'SENDGRID_API_KEY=%s\n'      "${SENDGRID_API_KEY:-}"
+  printf 'AWS_ACCESS_KEY_ID=%s\n'     "${AWS_ACCESS_KEY_ID}"
+  printf 'AWS_SECRET_ACCESS_KEY=%s\n' "${AWS_SECRET_ACCESS_KEY}"
+  printf 'OPENAI_API_KEY=%s\n'        "${OPENAI_API_KEY:-}"
+  printf 'PINECONE_API_KEY=%s\n'      "${PINECONE_API_KEY:-}"
+} | ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" \
+    "cat > ~/credepath-docker-compose/.env.secrets && chmod 600 ~/credepath-docker-compose/.env.secrets"
+ok "Secrets written"
+
+# 3. Run deploy.sh on EC2
+echo "  [3/3] Running deploy.sh..."
+ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" \
+  "NEXT_PUBLIC_API_BASE_URL='${PUBLIC_API_URL}' bash ~/credepath-docker-compose/deploy.sh '${DEPLOY_ENV}' '${IMAGE_TAG}'"
+
+echo ""
+hr
+ok "Deployed to ${DEPLOY_ENV} → http://${SSH_HOST}"
+hr

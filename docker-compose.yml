@@ -1,0 +1,90 @@
+services:
+  # Backend Service (From AWS ECR)
+  backend:
+    image: ${ECR_REGISTRY}/credepath-docker-compose-backend:${IMAGE_TAG:-latest}
+    container_name: credepath-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 5000
+      MONGODB_URI: ${MONGODB_URI}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-90d}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      SENDER_EMAIL: ${SENDER_EMAIL}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
+      JOB_RECOMMENDER_API_URL: ${JOB_RECOMMENDER_API_URL:-http://jobs-recommender:8000}
+    volumes:
+      - backend_logs:/app/logs
+    networks:
+      - credepath-network
+    
+
+  # ML Recommender Service (From AWS ECR)
+  jobs-recommender:
+    image: ${ECR_REGISTRY}/credepath-docker-compose-jobs-recommender:${IMAGE_TAG:-latest}
+    container_name: credepath-jobs-recommender
+    restart: unless-stopped
+    ports:
+      - "${ML_SERVICE_PORT:-8000}:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PINECONE_API_KEY: ${PINECONE_API_KEY}
+      PINECONE_ENV: ${PINECONE_ENV}
+      PINECONE_INDEX_NAME: ${PINECONE_INDEX_NAME}
+      SKIP_API_KEY_CHECK: ${SKIP_API_KEY_CHECK:-false}
+      API_HOST: ${ML_API_HOST:-0.0.0.0}
+      API_PORT: ${ML_API_PORT:-8000}
+    volumes:
+      - ml_cache:/app/.cache
+    networks:
+      - credepath-network
+    
+
+  # Frontend Service (From AWS ECR)
+  frontend:
+    image: ${ECR_REGISTRY}/credepath-docker-compose-frontend:${IMAGE_TAG:-latest}
+    container_name: credepath-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:5000/api/v1}
+      NEXT_PUBLIC_S3_BASE_URL: ${NEXT_PUBLIC_S3_BASE_URL}
+    depends_on:
+      - backend
+      - jobs-recommender
+    networks:
+      - credepath-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: credepath-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+      - jobs-recommender
+    networks:
+      - credepath-network
+
+networks:
+  credepath-network:
+    driver: bridge
+
+volumes:
+  backend_logs:
+    driver: local
+  ml_cache:
+    driver: local
