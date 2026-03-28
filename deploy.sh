@@ -93,9 +93,18 @@ set_env "ML_IMAGE"               "${ENV_ML_IMAGE}"
 AWS_REGION="$(grep '^AWS_REGION=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"
 set_env "NEXT_PUBLIC_S3_BASE_URL" "https://${ENV_BUCKET}.s3.${AWS_REGION}.amazonaws.com"
 
-# Override public API URL if caller passed it (EC2 IP differs per environment)
+# Derive public API URL dynamically from EC2's own public IP
+# Caller-passed NEXT_PUBLIC_API_BASE_URL takes priority if set
 if [ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]; then
   set_env "NEXT_PUBLIC_API_BASE_URL" "${NEXT_PUBLIC_API_BASE_URL}"
+else
+  EC2_PUBLIC_IP="$(curl -s --max-time 3 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  if [ -n "${EC2_PUBLIC_IP}" ]; then
+    set_env "NEXT_PUBLIC_API_BASE_URL" "http://${EC2_PUBLIC_IP}:5000/api/v1"
+    echo "==> NEXT_PUBLIC_API_BASE_URL auto-set: http://${EC2_PUBLIC_IP}:5000/api/v1"
+  else
+    echo "⚠  Could not detect EC2 public IP. NEXT_PUBLIC_API_BASE_URL not updated."
+  fi
 fi
 
 # ── ECR login ─────────────────────────────────────────────────────────────────
