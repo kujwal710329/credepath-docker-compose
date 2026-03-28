@@ -249,20 +249,9 @@ fi
 section "Step 4 — Deploying to ${DEPLOY_ENV}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=15"
 
-# 1. Pull latest code on EC2
+# 1. Write secrets to EC2 via SSH pipe (never stored locally as a file)
 echo ""
-echo "  [1/3] Pulling latest code (branch: ${DEPLOY_BRANCH})..."
-ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "
-  set -e
-  cd ~/credepath-docker-compose
-  git fetch origin
-  git checkout ${DEPLOY_BRANCH}
-  git pull origin ${DEPLOY_BRANCH}
-"
-ok "Repo updated"
-
-# 2. Write secrets to EC2 via SSH pipe (never stored locally as a file)
-echo "  [2/3] Writing secrets to EC2..."
+echo "  [1/2] Writing secrets to EC2..."
 {
   printf 'MONGODB_URI=%s\n'           "${MONGODB_URI}"
   printf 'JWT_SECRET=%s\n'            "${JWT_SECRET}"
@@ -275,8 +264,8 @@ echo "  [2/3] Writing secrets to EC2..."
     "cat > ~/credepath-docker-compose/.env.secrets && chmod 600 ~/credepath-docker-compose/.env.secrets"
 ok "Secrets written"
 
-# 3. Run deploy.sh on EC2
-echo "  [3/3] Running deploy.sh..."
+# 2. Run deploy.sh on EC2
+echo "  [2/2] Running deploy.sh..."
 ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" \
   "NEXT_PUBLIC_API_BASE_URL='${PUBLIC_API_URL}' bash ~/credepath-docker-compose/deploy.sh '${DEPLOY_ENV}' '${IMAGE_TAG}'"
 
