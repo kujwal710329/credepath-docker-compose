@@ -42,12 +42,18 @@ case "${ENVIRONMENT}" in
     ENV_BUCKET="credepath-staging"
     ENV_PINECONE_INDEX="acrapath-job-recommendations-staging"
     ENV_SKIP_API_CHECK="true"
+    ENV_BACKEND_IMAGE="acrapath/backend-dev"
+    ENV_FRONTEND_IMAGE="acrapath/frontend-dev"
+    ENV_ML_IMAGE="acrapath/jobs-recommender-dev"
     ;;
   production)
     ENV_NODE_ENV="production"
     ENV_BUCKET="credepath-prod"
     ENV_PINECONE_INDEX="acrapath-job-recommendations"
     ENV_SKIP_API_CHECK="false"
+    ENV_BACKEND_IMAGE="acrapath/backend"
+    ENV_FRONTEND_IMAGE="acrapath/frontend"
+    ENV_ML_IMAGE="acrapath/jobs-recommender"
     ;;
   *)
     echo "✗ Unknown environment '${ENVIRONMENT}'. Use: staging | production"
@@ -77,6 +83,9 @@ set_env "NODE_ENV"               "${ENV_NODE_ENV}"
 set_env "AWS_BUCKET_NAME"        "${ENV_BUCKET}"
 set_env "PINECONE_INDEX_NAME"    "${ENV_PINECONE_INDEX}"
 set_env "SKIP_API_KEY_CHECK"     "${ENV_SKIP_API_CHECK}"
+set_env "BACKEND_IMAGE"          "${ENV_BACKEND_IMAGE}"
+set_env "FRONTEND_IMAGE"         "${ENV_FRONTEND_IMAGE}"
+set_env "ML_IMAGE"               "${ENV_ML_IMAGE}"
 
 # Derive S3 URL from bucket and region
 AWS_REGION="$(grep '^AWS_REGION=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"

@@ -1,7 +1,7 @@
 services:
   # Backend Service (From AWS ECR)
   backend:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-backend:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${BACKEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-backend
     restart: unless-stopped
     ports:
@@ -27,7 +27,7 @@ services:
 
   # ML Recommender Service (From AWS ECR)
   jobs-recommender:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-jobs-recommender:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${ML_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-jobs-recommender
     restart: unless-stopped
     ports:
@@ -48,7 +48,7 @@ services:
 
   # Frontend Service (From AWS ECR)
   frontend:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-frontend:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-frontend
     restart: unless-stopped
     ports:
