@@ -40,12 +40,12 @@ case "${ENVIRONMENT}" in
   staging)
     ENV_NODE_ENV="development"
     ENV_BUCKET="credepath-staging"
-    ENV_PINECONE_INDEX="acrapath-job-recommendations-staging"
+    ENV_PINECONE_INDEX="acrapath-job-recommendations"
     ENV_SKIP_API_CHECK="true"
-    ENV_BACKEND_IMAGE="acrapath/backend-dev"
-    ENV_FRONTEND_IMAGE="acrapath/frontend-dev"
-    ENV_ML_IMAGE="acrapath/jobs-recommender-dev"
-    IMAGE_TAG="dev-${IMAGE_TAG}"   # staging tags: dev-latest, dev-<sha>
+    ENV_BACKEND_IMAGE="acrapath/backendstag"
+    ENV_FRONTEND_IMAGE="acrapath/frontendstag"
+    ENV_ML_IMAGE="acrapath/jobsrecommenderstag"
+    # staging tags match prod ECR repo naming: latest, <sha>
     ;;
   production)
     ENV_NODE_ENV="production"
@@ -55,7 +55,7 @@ case "${ENVIRONMENT}" in
     ENV_BACKEND_IMAGE="acrapath/backend"
     ENV_FRONTEND_IMAGE="acrapath/frontend"
     ENV_ML_IMAGE="acrapath/jobs-recommender"
-    IMAGE_TAG="prod-${IMAGE_TAG}"  # production tags: prod-latest, prod-<sha>
+    # production tags: latest, <sha>
     ;;
   *)
     echo "✗ Unknown environment '${ENVIRONMENT}'. Use: staging | production"
