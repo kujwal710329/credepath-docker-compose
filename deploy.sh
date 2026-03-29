@@ -5,13 +5,18 @@
 # Usage:
 #   bash deploy.sh [environment] [image_tag]
 #
+# ── Single source of truth ────────────────────────────────────────────────────
+# .env.config  — static values that never change (ports, region, JWT config…)
+# deploy.sh    — ALL environment-specific config lives in the case block below
+#                (NODE_ENV, bucket names, image names, Pinecone index, etc.)
+#
+# To change what gets deployed where, edit ONLY the case block below.
+# ─────────────────────────────────────────────────────────────────────────────
+#
 # Prerequisites before calling:
 #   1. .env.config must exist in the same directory (committed to git)
 #   2. .env.secrets must exist in the same directory (written by caller)
 #   3. AWS CLI and Docker Compose must be installed on the EC2
-#
-# Environment-specific config is centralized here — edit this file when
-# you need to change bucket names, Pinecone indexes, etc. per environment.
 
 set -euo pipefail
 
@@ -32,13 +37,12 @@ if [ ! -f "${DEPLOY_DIR}/.env.secrets" ]; then
 fi
 
 # ── Environment-specific config ───────────────────────────────────────────────
-# This is the single place to update per-environment non-sensitive config.
-# Values here override anything in .env.config.
-# NEXT_PUBLIC_API_BASE_URL is omitted here — pass it via env var from the caller
-# (GitHub Actions secret or start.sh prompt) since it contains the EC2 IP.
+# Edit here to change config per environment. These are written into .env at
+# deploy time. NEXT_PUBLIC_API_BASE_URL is derived automatically from the EC2
+# public IP (or passed explicitly via env var from the caller).
 case "${ENVIRONMENT}" in
   staging)
-    ENV_NODE_ENV="development"
+    ENV_NODE_ENV="staging"
     ENV_BUCKET="credepath-staging"
     ENV_PINECONE_INDEX="acrapath-job-recommendations"
     ENV_SKIP_API_CHECK="true"
@@ -80,7 +84,7 @@ set_env() {
   fi
 }
 
-set_env "IMAGE_TAG"              "${IMAGE_TAG}"
+set_env "IMAGE_TAG"              "${IMAGE_TAG}"   # from script arg $2 (default: latest)
 set_env "NODE_ENV"               "${ENV_NODE_ENV}"
 set_env "AWS_BUCKET_NAME"        "${ENV_BUCKET}"
 set_env "PINECONE_INDEX_NAME"    "${ENV_PINECONE_INDEX}"
@@ -98,7 +102,18 @@ set_env "NEXT_PUBLIC_S3_BASE_URL" "https://${ENV_BUCKET}.s3.${AWS_REGION}.amazon
 if [ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]; then
   set_env "NEXT_PUBLIC_API_BASE_URL" "${NEXT_PUBLIC_API_BASE_URL}"
 else
-  EC2_PUBLIC_IP="$(curl -s --max-time 3 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  # Try IMDSv2 first (required on most modern EC2 instances), fall back to IMDSv1
+  IMDS_TOKEN="$(curl -s -X PUT --max-time 3 \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    http://169.254.169.254/latest/api/token 2>/dev/null || echo "")"
+  if [ -n "${IMDS_TOKEN}" ]; then
+    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
+      -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  else
+    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
+      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  fi
   if [ -n "${EC2_PUBLIC_IP}" ]; then
     set_env "NEXT_PUBLIC_API_BASE_URL" "http://${EC2_PUBLIC_IP}:5000/api/v1"
     echo "==> NEXT_PUBLIC_API_BASE_URL auto-set: http://${EC2_PUBLIC_IP}:5000/api/v1"
