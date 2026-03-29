@@ -97,31 +97,6 @@ set_env "ML_IMAGE"               "${ENV_ML_IMAGE}"
 AWS_REGION="$(grep '^AWS_REGION=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"
 set_env "NEXT_PUBLIC_S3_BASE_URL" "https://${ENV_BUCKET}.s3.${AWS_REGION}.amazonaws.com"
 
-# Derive public API URL dynamically from EC2's own public IP
-# Caller-passed NEXT_PUBLIC_API_BASE_URL takes priority if set
-if [ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]; then
-  set_env "NEXT_PUBLIC_API_BASE_URL" "${NEXT_PUBLIC_API_BASE_URL}"
-else
-  # Try IMDSv2 first (required on most modern EC2 instances), fall back to IMDSv1
-  IMDS_TOKEN="$(curl -s -X PUT --max-time 3 \
-    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
-    http://169.254.169.254/latest/api/token 2>/dev/null || echo "")"
-  if [ -n "${IMDS_TOKEN}" ]; then
-    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
-      -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
-      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
-  else
-    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
-      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
-  fi
-  if [ -n "${EC2_PUBLIC_IP}" ]; then
-    set_env "NEXT_PUBLIC_API_BASE_URL" "http://${EC2_PUBLIC_IP}:5000/api/v1"
-    echo "==> NEXT_PUBLIC_API_BASE_URL auto-set: http://${EC2_PUBLIC_IP}:5000/api/v1"
-  else
-    echo "⚠  Could not detect EC2 public IP. NEXT_PUBLIC_API_BASE_URL not updated."
-  fi
-fi
-
 # ── ECR login ─────────────────────────────────────────────────────────────────
 ECR_REGISTRY="$(grep '^ECR_REGISTRY=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"
 export AWS_ACCESS_KEY_ID="$(grep '^AWS_ACCESS_KEY_ID=' "${DEPLOY_DIR}/.env" | cut -d= -f2-)"
