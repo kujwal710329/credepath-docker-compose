@@ -1,6 +1,6 @@
 #!/bin/bash
 # deploy.sh — Runs ON the EC2 instance to deploy the application.
-# Called by: GitHub Actions (CI/CD) or start.sh (local SSH deploy).
+# Called by: GitHub Actions (CI/CD).
 #
 # Usage:
 #   bash deploy.sh [environment] [image_tag]
@@ -43,7 +43,7 @@ fi
 case "${ENVIRONMENT}" in
   staging)
     ENV_NODE_ENV="staging"
-    ENV_BUCKET="credepath-staging"
+    ENV_BUCKET="credepath-prod"
     ENV_PINECONE_INDEX="acrapath-job-recommendations"
     ENV_SKIP_API_CHECK="true"
     ENV_BACKEND_IMAGE="acrapath/backendstag"
@@ -53,12 +53,12 @@ case "${ENVIRONMENT}" in
     ;;
   production)
     ENV_NODE_ENV="production"
-    ENV_BUCKET="credepath-prod"
-    ENV_PINECONE_INDEX="acrapath-job-recommendations"
+    ENV_BUCKET="acrapath-prod"
+    ENV_PINECONE_INDEX="acrapath-prod-index"
     ENV_SKIP_API_CHECK="false"
     ENV_BACKEND_IMAGE="acrapath/backend"
     ENV_FRONTEND_IMAGE="acrapath/frontend"
-    ENV_ML_IMAGE="acrapath/jobs-recommender"
+    ENV_ML_IMAGE="acrapath/jobsrecommender"
     # production tags: latest, <sha>
     ;;
   *)
@@ -84,7 +84,7 @@ set_env() {
   fi
 }
 
-set_env "IMAGE_TAG"              "${IMAGE_TAG}"   # from script arg $2 (default: latest)
+set_env "IMAGE_TAG"              "${IMAGE_TAG}"
 set_env "NODE_ENV"               "${ENV_NODE_ENV}"
 set_env "AWS_BUCKET_NAME"        "${ENV_BUCKET}"
 set_env "PINECONE_INDEX_NAME"    "${ENV_PINECONE_INDEX}"
@@ -96,6 +96,31 @@ set_env "ML_IMAGE"               "${ENV_ML_IMAGE}"
 # Derive S3 URL from bucket and region
 AWS_REGION="$(grep '^AWS_REGION=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"
 set_env "NEXT_PUBLIC_S3_BASE_URL" "https://${ENV_BUCKET}.s3.${AWS_REGION}.amazonaws.com"
+
+# Derive public API URL dynamically from EC2's own public IP
+# Caller-passed NEXT_PUBLIC_API_BASE_URL takes priority if set
+if [ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]; then
+  set_env "NEXT_PUBLIC_API_BASE_URL" "${NEXT_PUBLIC_API_BASE_URL}"
+else
+  # Try IMDSv2 first (required on most modern EC2 instances), fall back to IMDSv1
+  IMDS_TOKEN="$(curl -s -X PUT --max-time 3 \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    http://169.254.169.254/latest/api/token 2>/dev/null || echo "")"
+  if [ -n "${IMDS_TOKEN}" ]; then
+    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
+      -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  else
+    EC2_PUBLIC_IP="$(curl -s --max-time 3 \
+      http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")"
+  fi
+  if [ -n "${EC2_PUBLIC_IP}" ]; then
+    set_env "NEXT_PUBLIC_API_BASE_URL" "http://${EC2_PUBLIC_IP}:5000/api/v1"
+    echo "==> NEXT_PUBLIC_API_BASE_URL auto-set: http://${EC2_PUBLIC_IP}:5000/api/v1"
+  else
+    echo "⚠  Could not detect EC2 public IP. NEXT_PUBLIC_API_BASE_URL not updated."
+  fi
+fi
 
 # ── ECR login ─────────────────────────────────────────────────────────────────
 ECR_REGISTRY="$(grep '^ECR_REGISTRY=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"
