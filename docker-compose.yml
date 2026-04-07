@@ -1,7 +1,7 @@
 services:
   # Backend Service (From AWS ECR)
   backend:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-backend:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${BACKEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-backend
     restart: unless-stopped
     ports:
@@ -19,15 +19,13 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
       JOB_RECOMMENDER_API_URL: ${JOB_RECOMMENDER_API_URL:-http://jobs-recommender:8000}
-    volumes:
-      - backend_logs:/app/logs
     networks:
       - credepath-network
     
 
   # ML Recommender Service (From AWS ECR)
   jobs-recommender:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-jobs-recommender:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${ML_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-jobs-recommender
     restart: unless-stopped
     ports:
@@ -48,14 +46,13 @@ services:
 
   # Frontend Service (From AWS ECR)
   frontend:
-    image: ${ECR_REGISTRY}/credepath-docker-compose-frontend:${IMAGE_TAG:-latest}
+    image: ${ECR_REGISTRY}/${FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: credepath-frontend
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:5000/api/v1}
       NEXT_PUBLIC_S3_BASE_URL: ${NEXT_PUBLIC_S3_BASE_URL}
     depends_on:
       - backend
@@ -84,7 +81,5 @@ networks:
     driver: bridge
 
 volumes:
-  backend_logs:
-    driver: local
   ml_cache:
     driver: local

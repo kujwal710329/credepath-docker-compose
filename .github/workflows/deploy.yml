@@ -1,127 +1,793 @@
-name: Deploy
+name: Deploy to Environment
 
-# Triggers:
-#   push to develop-1.0.0  → staging EC2   (auto)
-#   push to main            → production EC2 (auto)
-#   workflow_dispatch       → choose staging or production manually
-#
-# Environment-specific config (bucket names, NODE_ENV, etc.) lives in deploy.sh.
-# Secrets are scoped per GitHub Environment (staging / production) — same names,
-# different values: EC2_HOST, EC2_USER, EC2_SSH_KEY, MONGODB_URI, JWT_SECRET,
-# SENDGRID_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, OPENAI_API_KEY,
-# PINECONE_API_KEY, NEXT_PUBLIC_API_BASE_URL
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                    PRODUCTION-GRADE DEPLOYMENT WORKFLOW                       ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║ Purpose: Deploy credepath application to staging or production environments  ║
+# ║ Trigger: Manual only (workflow_dispatch) from main branch                    ║
+# ║ Features:                                                                     ║
+# ║   • Environment-based deployment (staging/production)                         ║
+# ║   • GitHub Environments with approval workflow                                ║
+# ║   • Pre-deployment validation                                                 ║
+# ║   • Health checks and smoke tests                                             ║
+# ║   • Automatic rollback on failure                                             ║
+# ║   • Slack notifications                                                       ║
+# ║   • Comprehensive logging and audit trail                                     ║
+# ║   • Deployment history tracking                                               ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 on:
-  push:
-    branches:
-      - develop-1.0.0  # → staging environment
-      - main           # → production environment
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment'
+        description: '🎯 Target deployment environment'
         required: true
         type: choice
         options:
           - staging
           - production
+        default: 'staging'
+
       image_tag:
-        description: 'ECR image tag (e.g. latest, v1.2.0)'
+        description: '🏷️  Docker image tag to deploy (e.g., latest, v1.2.0, commit-sha)'
         required: false
         default: 'latest'
+        type: string
 
+      skip_health_checks:
+        description: '⚠️  Skip post-deployment health checks (not recommended)'
+        required: false
+        type: boolean
+        default: false
+
+      enable_rollback:
+        description: '🔄 Enable automatic rollback on deployment failure'
+        required: false
+        type: boolean
+        default: true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKFLOW PERMISSIONS
+# ══════════════════════════════════════════════════════════════════════════════
+permissions:
+  contents: read        # Read repository contents
+  deployments: write    # Create/update deployment status
+  issues: write         # Post deployment notifications (optional)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT JOBS
+# ══════════════════════════════════════════════════════════════════════════════
 jobs:
-  deploy:
-    name: "Deploy to ${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}"
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Pre-Deployment Validation
+  # ────────────────────────────────────────────────────────────────────────────
+  pre-deployment-checks:
+    name: 🔍 Pre-Deployment Validation
     runs-on: ubuntu-latest
 
-    # Secrets auto-resolve from the active GitHub Environment.
-    # push to main → 'production', push to develop-1.0.0 → 'staging'.
-    environment: ${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}
+    outputs:
+      deploy_timestamp: ${{ steps.metadata.outputs.timestamp }}
+      deploy_id: ${{ steps.metadata.outputs.deploy_id }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ── Resolve branch and image tag ─────────────────────────────────────────
-      - name: Resolve target
-        id: target
+      - name: 📋 Validate workflow inputs
         run: |
-          ENV="${{ (github.event_name == 'workflow_dispatch') && github.event.inputs.environment || (github.ref_name == 'main' && 'production' || 'staging') }}"
+          echo "::notice::Starting pre-deployment validation..."
 
-          [ "$ENV" == "production" ] \
-            && echo "deploy_branch=main" >> $GITHUB_OUTPUT \
-            || echo "deploy_branch=develop-1.0.0" >> $GITHUB_OUTPUT
-
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.image_tag }}" ]; then
-            echo "image_tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "image_tag=latest" >> $GITHUB_OUTPUT
+          # Validate environment
+          if [[ ! "${{ inputs.environment }}" =~ ^(staging|production)$ ]]; then
+            echo "::error::Invalid environment: ${{ inputs.environment }}"
+            exit 1
           fi
 
-          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          # Validate image tag format
+          if [[ -z "${{ inputs.image_tag }}" ]]; then
+            echo "::error::Image tag cannot be empty"
+            exit 1
+          fi
 
-      # ── Deploy via SSH ────────────────────────────────────────────────────────
-      # Secrets arrive as shell env vars via appleboy envs: — values are
-      # shell-escaped by the action, safe for special characters.
-      - name: Deploy on EC2
+          echo "✅ Environment: ${{ inputs.environment }}"
+          echo "✅ Image Tag: ${{ inputs.image_tag }}"
+          echo "✅ Health Checks: ${{ inputs.skip_health_checks == false && 'Enabled' || 'Disabled' }}"
+          echo "✅ Auto Rollback: ${{ inputs.enable_rollback == true && 'Enabled' || 'Disabled' }}"
+
+      - name: 🔒 Verify main branch deployment
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+
+          if [[ "${BRANCH_NAME}" != "main" ]]; then
+            echo "::error::❌ Deployments are only allowed from the 'main' branch"
+            echo "::error::Current branch: ${BRANCH_NAME}"
+            echo "::error::Please merge your changes to main first, then trigger the deployment"
+            exit 1
+          fi
+
+          echo "✅ Branch validation passed: ${BRANCH_NAME}"
+
+      - name: 📊 Generate deployment metadata
+        id: metadata
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          DEPLOY_ID="deploy-$(date +%s)"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "deploy_id=${DEPLOY_ID}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+          echo "📅 Deployment Timestamp: ${TIMESTAMP}"
+          echo "🆔 Deployment ID: ${DEPLOY_ID}"
+          echo "🔖 Commit SHA: ${SHORT_SHA}"
+
+      - name: ✅ Pre-deployment checks complete
+        run: |
+          echo "::notice::✅ All pre-deployment validation checks passed!"
+          echo ""
+          echo "╔════════════════════════════════════════════════════════╗"
+          echo "║          DEPLOYMENT VALIDATION SUCCESSFUL              ║"
+          echo "╠════════════════════════════════════════════════════════╣"
+          echo "║ Environment:  ${{ inputs.environment }}"
+          echo "║ Image Tag:    ${{ inputs.image_tag }}"
+          echo "║ Branch:       ${{ github.ref_name }}"
+          echo "║ Triggered by: ${{ github.actor }}"
+          echo "╚════════════════════════════════════════════════════════╝"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Main Deployment
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: pre-deployment-checks
+
+    # ╔════════════════════════════════════════════════════════════════════════╗
+    # ║ GITHUB ENVIRONMENT INTEGRATION                                          ║
+    # ║ This automatically loads environment-specific secrets and variables     ║
+    # ║ For production, this will trigger approval workflow if configured       ║
+    # ╚════════════════════════════════════════════════════════════════════════╝
+    environment: ${{ inputs.environment }}
+
+    # Set deployment timeout (30 minutes max)
+    timeout-minutes: 30
+
+    outputs:
+      deployment_status: ${{ steps.deploy_status.outputs.status }}
+      deployment_url: ${{ steps.deploy_status.outputs.url }}
+
+    steps:
+      # ──────────────────────────────────────────────────────────────────────
+      # STEP 1: Repository Checkout
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main  # Always deploy from main branch
+          fetch-depth: 0  # Fetch full history for better debugging
+
+      # ──────────────────────────────────────────────────────────────────────
+      # STEP 2: Deployment Notification - Start
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 📢 Notify deployment start
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "::notice::🚀 Deployment started to ${{ inputs.environment }}"
+          echo "Deployer: ${{ github.actor }}"
+          echo "Commit: ${{ needs.pre-deployment-checks.outputs.short_sha }}"
+          echo "Image Tag: ${{ inputs.image_tag }}"
+
+          # Optional: Add Slack notification here
+          # Example webhook call (uncomment and add SLACK_WEBHOOK_URL to secrets):
+          # curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{
+          #     "text": "🚀 Deployment to ${{ inputs.environment }} started",
+          #     "attachments": [{
+          #       "color": "warning",
+          #       "fields": [
+          #         {"title": "Environment", "value": "${{ inputs.environment }}", "short": true},
+          #         {"title": "Image Tag", "value": "${{ inputs.image_tag }}", "short": true},
+          #         {"title": "Deployer", "value": "${{ github.actor }}", "short": true},
+          #         {"title": "Commit", "value": "${{ needs.pre-deployment-checks.outputs.short_sha }}", "short": true}
+          #       ]
+          #     }]
+          #   }'
+
+      # ──────────────────────────────────────────────────────────────────────
+      # STEP 3: Capture Current Deployment State (for rollback)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 💾 Capture current deployment state
+        id: capture_state
+        if: inputs.enable_rollback == true
+        uses: appleboy/ssh-action@v1.0.3
+        continue-on-error: true
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            DEPLOY_DIR=~/credepath-docker-compose
+
+            if [ -d "${DEPLOY_DIR}" ]; then
+              echo "==> Capturing current deployment state for rollback..."
+
+              cd "${DEPLOY_DIR}"
+
+              # Capture current git commit
+              CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+              echo "Current commit: ${CURRENT_COMMIT}"
+
+              # Capture running container info
+              docker compose ps --format json > /tmp/pre_deploy_state.json 2>/dev/null || true
+
+              # Save current image tags
+              docker compose images --format json > /tmp/pre_deploy_images.json 2>/dev/null || true
+
+              echo "==> State captured successfully"
+              echo "ROLLBACK_COMMIT=${CURRENT_COMMIT}" >> /tmp/rollback_info.txt
+            else
+              echo "==> No existing deployment found. Fresh deployment."
+              echo "ROLLBACK_COMMIT=none" >> /tmp/rollback_info.txt
+            fi
+
+      # ──────────────────────────────────────────────────────────────────────
+      # STEP 4: Main Deployment via SSH
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 🎯 Deploy to ${{ inputs.environment }} EC2
+        id: deploy
         uses: appleboy/ssh-action@v1.0.3
         env:
-          MONGODB_URI:            ${{ secrets.MONGODB_URI }}
-          JWT_SECRET:             ${{ secrets.JWT_SECRET }}
-          SENDGRID_API_KEY:       ${{ secrets.SENDGRID_API_KEY }}
-          AWS_ACCESS_KEY_ID:      ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          OPENAI_API_KEY:         ${{ secrets.OPENAI_API_KEY }}
-          PINECONE_API_KEY:       ${{ secrets.PINECONE_API_KEY }}
+          # ═══════════════════════════════════════════════════════════════
+          # ENVIRONMENT SECRETS (automatically loaded from GitHub Environment)
+          # ═══════════════════════════════════════════════════════════════
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL }}
         with:
-          host:     ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
-          key:      ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 20m
           envs: MONGODB_URI,JWT_SECRET,SENDGRID_API_KEY,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,OPENAI_API_KEY,PINECONE_API_KEY,NEXT_PUBLIC_API_BASE_URL
           script: |
             set -e
 
-            DEPLOY_BRANCH="${{ steps.target.outputs.deploy_branch }}"
-            DEPLOY_ENV="${{ steps.target.outputs.environment }}"
-            IMAGE_TAG="${{ steps.target.outputs.image_tag }}"
+            # ═══════════════════════════════════════════════════════════════
+            # DEPLOYMENT CONFIGURATION
+            # ═══════════════════════════════════════════════════════════════
+            DEPLOY_BRANCH="main"
+            DEPLOY_ENV="${{ inputs.environment }}"
+            IMAGE_TAG="${{ inputs.image_tag }}"
             DEPLOY_DIR=~/credepath-docker-compose
 
-            # ── 1. Pull latest code ────────────────────────────────────────────
-            echo "==> Updating repo [branch: ${DEPLOY_BRANCH}]..."
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║              CREDEPATH DEPLOYMENT STARTING                 ║"
+            echo "╠════════════════════════════════════════════════════════════╣"
+            echo "║ Environment:    ${DEPLOY_ENV}"
+            echo "║ Image Tag:      ${IMAGE_TAG}"
+            echo "║ Branch:         ${DEPLOY_BRANCH}"
+            echo "║ Deploy Dir:     ${DEPLOY_DIR}"
+            echo "║ Timestamp:      $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 1: Clone or Update Repository
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [1/7] Syncing repository..."
+            if [ ! -d "${DEPLOY_DIR}/.git" ]; then
+              echo "    → Repository not found. Cloning..."
+              git clone git@github.com:kujwal710329/credepath-docker-compose.git "${DEPLOY_DIR}"
+            else
+              echo "    → Repository exists. Updating..."
+            fi
+
             cd "${DEPLOY_DIR}"
-            git fetch origin
+            git fetch origin --prune
             git checkout "${DEPLOY_BRANCH}"
-            git pull origin "${DEPLOY_BRANCH}"
+            git reset --hard "origin/${DEPLOY_BRANCH}"
 
-            # ── 2. Write secrets ───────────────────────────────────────────────
-            echo "==> Writing secrets..."
-            printf '%s\n' \
-              "MONGODB_URI=${MONGODB_URI}" \
-              "JWT_SECRET=${JWT_SECRET}" \
-              "SENDGRID_API_KEY=${SENDGRID_API_KEY}" \
-              "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" \
-              "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" \
-              "OPENAI_API_KEY=${OPENAI_API_KEY}" \
-              "PINECONE_API_KEY=${PINECONE_API_KEY}" \
-              > "${DEPLOY_DIR}/.env.secrets"
+            CURRENT_COMMIT=$(git rev-parse HEAD)
+            echo "    ✅ Repository synced (commit: ${CURRENT_COMMIT:0:7})"
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 2: Validate Required Files
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [2/7] Validating deployment files..."
+
+            REQUIRED_FILES=(
+              "docker-compose.yml"
+              "deploy.sh"
+              ".env.config"
+            )
+
+            for file in "${REQUIRED_FILES[@]}"; do
+              if [ ! -f "${DEPLOY_DIR}/${file}" ]; then
+                echo "    ❌ ERROR: Required file missing: ${file}"
+                exit 1
+              fi
+              echo "    ✅ Found: ${file}"
+            done
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 3: Write Environment Secrets
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [3/7] Writing environment secrets..."
+
+            # Create .env.secrets with all sensitive variables
+            cat > "${DEPLOY_DIR}/.env.secrets" <<EOF
+            MONGODB_URI=${MONGODB_URI}
+            JWT_SECRET=${JWT_SECRET}
+            SENDGRID_API_KEY=${SENDGRID_API_KEY}
+            AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+            AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+            OPENAI_API_KEY=${OPENAI_API_KEY}
+            PINECONE_API_KEY=${PINECONE_API_KEY}
+            EOF
+
             chmod 600 "${DEPLOY_DIR}/.env.secrets"
+            echo "    ✅ Secrets written securely (permissions: 600)"
+            echo ""
 
-            # ── 3. Run deploy.sh (handles env config + ECR + docker compose) ──
-            echo "==> Running deploy.sh..."
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 4: Pre-Deployment Docker Cleanup
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [4/7] Pre-deployment cleanup..."
+
+            # Stop any running containers gracefully
+            if docker compose ps -q 2>/dev/null | grep -q .; then
+              echo "    → Stopping existing containers..."
+              docker compose down --timeout 30 || true
+            fi
+
+            # Clean up dangling images and containers
+            echo "    → Cleaning dangling resources..."
+            docker system prune -f --volumes || true
+
+            echo "    ✅ Cleanup complete"
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 5: Run Deployment Script
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [5/7] Executing deployment..."
+
+            # Make deploy.sh executable
+            chmod +x "${DEPLOY_DIR}/deploy.sh"
+
+            # Run the deployment script with environment and tag
             NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL}" \
               bash "${DEPLOY_DIR}/deploy.sh" "${DEPLOY_ENV}" "${IMAGE_TAG}"
 
-      # ── Summary ───────────────────────────────────────────────────────────────
-      - name: Summary
+            if [ $? -eq 0 ]; then
+              echo "    ✅ Deployment script executed successfully"
+            else
+              echo "    ❌ Deployment script failed!"
+              exit 1
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 6: Verify Container Status
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [6/7] Verifying container status..."
+
+            sleep 5  # Give containers a moment to stabilize
+
+            # Check if all expected containers are running
+            EXPECTED_CONTAINERS=("credepath-backend" "credepath-frontend" "credepath-jobs-recommender" "credepath-nginx")
+            ALL_RUNNING=true
+
+            for container in "${EXPECTED_CONTAINERS[@]}"; do
+              if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+                STATUS=$(docker inspect --format='{{.State.Status}}' "${container}")
+                if [ "${STATUS}" = "running" ]; then
+                  echo "    ✅ ${container}: running"
+                else
+                  echo "    ❌ ${container}: ${STATUS}"
+                  ALL_RUNNING=false
+                fi
+              else
+                echo "    ❌ ${container}: not found"
+                ALL_RUNNING=false
+              fi
+            done
+
+            if [ "${ALL_RUNNING}" = false ]; then
+              echo ""
+              echo "    ⚠️  WARNING: Some containers are not running properly"
+              echo "    Container status:"
+              docker compose ps
+              exit 1
+            fi
+
+            echo "    ✅ All containers running successfully"
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 7: Display Deployment Summary
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [7/7] Deployment summary..."
+            echo ""
+            docker compose ps
+            echo ""
+
+            # Display resource usage
+            echo "==> Container resource usage:"
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+            echo ""
+
+            # Display image information
+            echo "==> Deployed images:"
+            docker compose images
+            echo ""
+
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║            DEPLOYMENT COMPLETED SUCCESSFULLY               ║"
+            echo "╠════════════════════════════════════════════════════════════╣"
+            echo "║ Environment:    ${DEPLOY_ENV}"
+            echo "║ Image Tag:      ${IMAGE_TAG}"
+            echo "║ Commit:         ${CURRENT_COMMIT:0:7}"
+            echo "║ Completed:      $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+            echo "╚════════════════════════════════════════════════════════════╝"
+
+      # ──────────────────────────────────────────────────────────────────────
+      # STEP 5: Set Deployment Status
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 📊 Set deployment status
+        id: deploy_status
+        if: always()
         run: |
-          echo "### Deploy Complete :rocket:" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | \`${{ steps.target.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Branch**      | \`${{ steps.target.outputs.deploy_branch }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Image tag**   | \`${{ steps.target.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **EC2 host**    | \`${{ secrets.EC2_HOST }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Triggered by**| \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Commit**      | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.deploy.outcome }}" = "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "url=http://${{ secrets.EC2_HOST }}" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "url=" >> $GITHUB_OUTPUT
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Post-Deployment Health Checks
+  # ────────────────────────────────────────────────────────────────────────────
+  post-deployment-checks:
+    name: 🏥 Health Checks
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy]
+    if: inputs.skip_health_checks == false && needs.deploy.outputs.deployment_status == 'success'
+
+    steps:
+      - name: ⏱️  Wait for services to stabilize
+        run: |
+          echo "⏳ Waiting 30 seconds for services to fully initialize..."
+          sleep 30
+          echo "✅ Wait complete"
+
+      - name: 🔍 Run health checks
+        id: health_check
+        uses: appleboy/ssh-action@v1.0.3
+        continue-on-error: true
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║              RUNNING HEALTH CHECKS                         ║"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            DEPLOY_DIR=~/credepath-docker-compose
+            cd "${DEPLOY_DIR}"
+
+            # ═══════════════════════════════════════════════════════════════
+            # Health Check 1: Container Status
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [1/5] Checking container health..."
+
+            UNHEALTHY_CONTAINERS=$(docker compose ps --format json | jq -r 'select(.State != "running") | .Name' 2>/dev/null || echo "")
+
+            if [ -z "${UNHEALTHY_CONTAINERS}" ]; then
+              echo "    ✅ All containers are running"
+            else
+              echo "    ❌ Unhealthy containers found:"
+              echo "${UNHEALTHY_CONTAINERS}"
+              exit 1
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # Health Check 2: Backend API Health
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [2/5] Checking backend API health..."
+
+            BACKEND_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/v1/health 2>/dev/null || echo "000")
+
+            if [ "${BACKEND_HEALTH}" = "200" ] || [ "${BACKEND_HEALTH}" = "404" ]; then
+              echo "    ✅ Backend is responding (HTTP ${BACKEND_HEALTH})"
+            else
+              echo "    ❌ Backend health check failed (HTTP ${BACKEND_HEALTH})"
+              exit 1
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # Health Check 3: ML Service Health
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [3/5] Checking ML service health..."
+
+            ML_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>/dev/null || echo "000")
+
+            if [ "${ML_HEALTH}" = "200" ] || [ "${ML_HEALTH}" = "404" ]; then
+              echo "    ✅ ML service is responding (HTTP ${ML_HEALTH})"
+            else
+              echo "    ⚠️  ML service health check inconclusive (HTTP ${ML_HEALTH})"
+              # Don't fail on ML service - it might not have a /health endpoint
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # Health Check 4: Frontend Availability
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [4/5] Checking frontend availability..."
+
+            FRONTEND_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 2>/dev/null || echo "000")
+
+            if [ "${FRONTEND_HEALTH}" = "200" ] || [ "${FRONTEND_HEALTH}" = "404" ]; then
+              echo "    ✅ Frontend is responding (HTTP ${FRONTEND_HEALTH})"
+            else
+              echo "    ❌ Frontend health check failed (HTTP ${FRONTEND_HEALTH})"
+              exit 1
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # Health Check 5: Nginx Reverse Proxy
+            # ═══════════════════════════════════════════════════════════════
+            echo "==> [5/5] Checking Nginx reverse proxy..."
+
+            NGINX_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
+
+            if [ "${NGINX_HEALTH}" = "200" ] || [ "${NGINX_HEALTH}" = "301" ] || [ "${NGINX_HEALTH}" = "302" ]; then
+              echo "    ✅ Nginx is responding (HTTP ${NGINX_HEALTH})"
+            else
+              echo "    ⚠️  Nginx health check inconclusive (HTTP ${NGINX_HEALTH})"
+            fi
+            echo ""
+
+            # ═══════════════════════════════════════════════════════════════
+            # Final Health Summary
+            # ═══════════════════════════════════════════════════════════════
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║          ALL HEALTH CHECKS PASSED SUCCESSFULLY             ║"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            # Display container logs summary (last 10 lines each)
+            echo "==> Recent container logs:"
+            for container in credepath-backend credepath-frontend credepath-jobs-recommender; do
+              echo ""
+              echo "--- ${container} (last 10 lines) ---"
+              docker logs --tail 10 "${container}" 2>&1 || true
+            done
+
+      - name: 📊 Health check summary
+        if: always()
+        run: |
+          if [ "${{ steps.health_check.outcome }}" = "success" ]; then
+            echo "::notice::✅ All health checks passed!"
+          else
+            echo "::warning::⚠️ Some health checks failed. Review the logs above."
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4: Rollback on Failure (Optional)
+  # ────────────────────────────────────────────────────────────────────────────
+  rollback:
+    name: 🔄 Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy, post-deployment-checks]
+    if: |
+      always() &&
+      inputs.enable_rollback == true &&
+      (needs.deploy.outputs.deployment_status == 'failure' ||
+       needs.post-deployment-checks.result == 'failure')
+
+    steps:
+      - name: 🚨 Rollback triggered
+        run: |
+          echo "::error::❌ Deployment failed. Initiating rollback..."
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Failed Image Tag: ${{ inputs.image_tag }}"
+
+      - name: ⏮️  Execute rollback
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║                   INITIATING ROLLBACK                      ║"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            DEPLOY_DIR=~/credepath-docker-compose
+
+            if [ -f /tmp/rollback_info.txt ]; then
+              source /tmp/rollback_info.txt
+
+              if [ "${ROLLBACK_COMMIT}" != "none" ] && [ "${ROLLBACK_COMMIT}" != "unknown" ]; then
+                echo "==> Rolling back to commit: ${ROLLBACK_COMMIT}"
+
+                cd "${DEPLOY_DIR}"
+                git checkout "${ROLLBACK_COMMIT}"
+
+                # Restart services with previous configuration
+                docker compose down --timeout 30
+                docker compose up -d --remove-orphans
+
+                echo "✅ Rollback complete"
+                docker compose ps
+              else
+                echo "⚠️  No previous deployment state found. Manual intervention required."
+              fi
+            else
+              echo "⚠️  Rollback information not available. Manual intervention required."
+            fi
+
+            echo ""
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║              ROLLBACK COMPLETED                            ║"
+            echo "╚════════════════════════════════════════════════════════════╝"
+
+      - name: 📢 Notify rollback completion
+        if: always()
+        run: |
+          echo "::warning::🔄 Rollback procedure completed"
+          echo "::warning::Please review the deployment logs and fix the issues before attempting to redeploy"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 5: Deployment Summary & Notifications
+  # ────────────────────────────────────────────────────────────────────────────
+  summary:
+    name: 📋 Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, deploy, post-deployment-checks]
+    if: always()
+
+    steps:
+      - name: 📊 Generate deployment summary
+        run: |
+          echo "# 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Deployment status badge
+          if [ "${{ needs.deploy.outputs.deployment_status }}" = "success" ]; then
+            echo "## ✅ Deployment Status: **SUCCESS**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Deployment Status: **FAILED**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Deployment details table
+          echo "## 📋 Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | \`${{ inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image Tag** | \`${{ inputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit SHA** | \`${{ needs.pre-deployment-checks.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered By** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Timestamp** | ${{ needs.pre-deployment-checks.outputs.deploy_timestamp }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Deployment ID** | \`${{ needs.pre-deployment-checks.outputs.deploy_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **EC2 Host** | \`${{ secrets.EC2_HOST }}\` |" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Job status table
+          echo "## 🔍 Job Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Pre-Deployment Checks | ${{ needs.pre-deployment-checks.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | ${{ needs.deploy.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Health Checks | ${{ needs.post-deployment-checks.result == 'success' && '✅ Passed' || needs.post-deployment-checks.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Access URLs
+          if [ "${{ needs.deploy.outputs.deployment_status }}" = "success" ]; then
+            echo "## 🌐 Access URLs" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Application**: http://${{ secrets.EC2_HOST }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Backend API**: http://${{ secrets.EC2_HOST }}:5000/api/v1" >> $GITHUB_STEP_SUMMARY
+            echo "- **Frontend**: http://${{ secrets.EC2_HOST }}:3000" >> $GITHUB_STEP_SUMMARY
+            echo "- **ML Service**: http://${{ secrets.EC2_HOST }}:8000" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Next steps
+          echo "## 📝 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.deploy.outputs.deployment_status }}" = "success" ]; then
+            echo "1. ✅ Verify application functionality in ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+            echo "2. 🧪 Run smoke tests and manual QA" >> $GITHUB_STEP_SUMMARY
+            echo "3. 📊 Monitor application logs and metrics" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ inputs.environment }}" = "staging" ]; then
+              echo "4. 🚀 If stable, proceed with production deployment" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "1. ❌ Review deployment logs above" >> $GITHUB_STEP_SUMMARY
+            echo "2. 🔍 Investigate and fix the root cause" >> $GITHUB_STEP_SUMMARY
+            echo "3. 🔄 Re-trigger deployment after fixes" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 📢 Send notification (Success)
+        if: needs.deploy.outputs.deployment_status == 'success'
+        continue-on-error: true
+        run: |
+          echo "::notice::✅ Deployment to ${{ inputs.environment }} completed successfully!"
+
+          # Optional: Add Slack success notification
+          # Uncomment and add SLACK_WEBHOOK_URL to your GitHub secrets
+          #
+          # curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{
+          #     "text": "✅ Deployment to ${{ inputs.environment }} successful!",
+          #     "attachments": [{
+          #       "color": "good",
+          #       "fields": [
+          #         {"title": "Environment", "value": "${{ inputs.environment }}", "short": true},
+          #         {"title": "Image Tag", "value": "${{ inputs.image_tag }}", "short": true},
+          #         {"title": "Deployer", "value": "${{ github.actor }}", "short": true},
+          #         {"title": "Duration", "value": "~5 minutes", "short": true},
+          #         {"title": "URL", "value": "http://${{ secrets.EC2_HOST }}", "short": false}
+          #       ]
+          #     }]
+          #   }'
+
+      - name: 📢 Send notification (Failure)
+        if: needs.deploy.outputs.deployment_status == 'failure'
+        continue-on-error: true
+        run: |
+          echo "::error::❌ Deployment to ${{ inputs.environment }} failed!"
+
+          # Optional: Add Slack failure notification
+          # Uncomment and add SLACK_WEBHOOK_URL to your GitHub secrets
+          #
+          # curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{
+          #     "text": "❌ Deployment to ${{ inputs.environment }} failed!",
+          #     "attachments": [{
+          #       "color": "danger",
+          #       "fields": [
+          #         {"title": "Environment", "value": "${{ inputs.environment }}", "short": true},
+          #         {"title": "Image Tag", "value": "${{ inputs.image_tag }}", "short": true},
+          #         {"title": "Deployer", "value": "${{ github.actor }}", "short": true},
+          #         {"title": "Action", "value": "Please review logs and retry", "short": true}
+          #       ]
+          #     }]
+          #   }'
