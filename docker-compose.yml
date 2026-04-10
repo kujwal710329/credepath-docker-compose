@@ -19,6 +19,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
       JOB_RECOMMENDER_API_URL: ${JOB_RECOMMENDER_API_URL:-http://jobs-recommender:8000}
+      MSG91_AUTH_KEY: ${MSG91_AUTH_KEY}
+      MSG91_TEMPLATE_ID: ${MSG91_TEMPLATE_ID}
     networks:
       - credepath-network
     
