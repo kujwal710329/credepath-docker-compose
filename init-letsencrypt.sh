@@ -75,6 +75,24 @@ docker compose -f "$COMPOSE_FILE" up -d nginx
 echo "### Waiting for nginx to be ready ..."
 sleep 5
 
+# Verify nginx is running
+if ! docker compose -f "$COMPOSE_FILE" ps nginx | grep -q "Up"; then
+  echo "ERROR: nginx failed to start. Check logs with: docker logs credepath-nginx"
+  exit 1
+fi
+
+# Create a test file to verify ACME challenge path works
+echo "### Testing ACME challenge path ..."
+docker compose -f "$COMPOSE_FILE" run --rm --entrypoint "\
+  mkdir -p /var/www/certbot/.well-known/acme-challenge && \
+  echo 'test' > /var/www/certbot/.well-known/acme-challenge/test" certbot
+
+TEST_RESULT=$(curl -s http://localhost/.well-known/acme-challenge/test)
+if [ "$TEST_RESULT" != "test" ]; then
+  echo "WARNING: ACME challenge path test failed. Response: $TEST_RESULT"
+  echo "Continuing anyway..."
+fi
+
 # Step 2: Delete the dummy certificate
 echo "### Deleting dummy certificate ..."
 docker compose -f "$COMPOSE_FILE" run --rm --entrypoint "\
@@ -99,7 +117,17 @@ docker compose -f "$COMPOSE_FILE" run --rm certbot certonly \
   --agree-tos \
   --no-eff-email \
   --force-renewal \
+  --verbose \
   $STAGING_ARG
+
+# Check if certificate was created
+if docker compose -f "$COMPOSE_FILE" run --rm --entrypoint "\
+  test -f /etc/letsencrypt/live/${DOMAINS[0]}/fullchain.pem" certbot; then
+  echo "### Certificate successfully created!"
+else
+  echo "### ERROR: Certificate was not created. Check the output above for errors."
+  exit 1
+fi
 
 echo "### Reloading nginx ..."
 docker compose -f "$COMPOSE_FILE" exec nginx nginx -s reload
