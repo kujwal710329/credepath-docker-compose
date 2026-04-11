@@ -69,6 +69,32 @@ case "${ENVIRONMENT}" in
     ;;
 esac
 
+# ── TLS cert precheck (production only) ───────────────────────────────────────
+# nginx-production.conf terminates TLS and references files inside ./certs/.
+# If they're missing, nginx crash-loops on startup. Fail fast with a clear
+# message instead of letting CI deploy a broken stack.
+if [ "${ENVIRONMENT}" = "production" ]; then
+  CERT_DIR="${DEPLOY_DIR}/certs"
+  MISSING=()
+  for f in fullchain.pem privkey.pem; do
+    if [ ! -s "${CERT_DIR}/${f}" ]; then
+      MISSING+=("${CERT_DIR}/${f}")
+    fi
+  done
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    echo "✗ Production TLS cert files missing or empty:"
+    for f in "${MISSING[@]}"; do echo "    - ${f}"; done
+    echo ""
+    echo "  nginx-production.conf requires both fullchain.pem and privkey.pem"
+    echo "  to exist in ${CERT_DIR}/ on the host before deploy.sh runs."
+    echo ""
+    echo "  Place the cert files there (chmod 644 fullchain.pem, 600 privkey.pem)"
+    echo "  and re-run the deploy."
+    exit 1
+  fi
+  echo "==> ✅ TLS cert files present in ${CERT_DIR}/"
+fi
+
 # ── Build .env ────────────────────────────────────────────────────────────────
 echo "==> Building .env..."
 
