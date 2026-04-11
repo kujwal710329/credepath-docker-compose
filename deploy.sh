@@ -49,6 +49,7 @@ case "${ENVIRONMENT}" in
     ENV_BACKEND_IMAGE="acrapath/backendstag"
     ENV_FRONTEND_IMAGE="acrapath/frontendstag"
     ENV_ML_IMAGE="acrapath/jobsrecommenderstag"
+    ENV_NGINX_CONFIG="nginx-staging.conf"
     # staging tags match prod ECR repo naming: latest, <sha>
     ;;
   production)
@@ -59,6 +60,7 @@ case "${ENVIRONMENT}" in
     ENV_BACKEND_IMAGE="acrapath/backend"
     ENV_FRONTEND_IMAGE="acrapath/frontend"
     ENV_ML_IMAGE="acrapath/jobsrecommender"
+    ENV_NGINX_CONFIG="nginx-production.conf"
     # production tags: latest, <sha>
     ;;
   *)
@@ -92,6 +94,7 @@ set_env "SKIP_API_KEY_CHECK"     "${ENV_SKIP_API_CHECK}"
 set_env "BACKEND_IMAGE"          "${ENV_BACKEND_IMAGE}"
 set_env "FRONTEND_IMAGE"         "${ENV_FRONTEND_IMAGE}"
 set_env "ML_IMAGE"               "${ENV_ML_IMAGE}"
+set_env "NGINX_CONFIG"           "${ENV_NGINX_CONFIG}"
 
 # Derive S3 URL from bucket and region
 AWS_REGION="$(grep '^AWS_REGION=' "${DEPLOY_DIR}/.env.config" | cut -d= -f2 | xargs)"

@@ -62,15 +62,20 @@ services:
     networks:
       - credepath-network
 
-  # Nginx Reverse Proxy (HTTP only — TLS is terminated upstream / managed manually)
+  # Nginx Reverse Proxy
+  # Staging: HTTP only on :80 (nginx-staging.conf ignores the certs mount)
+  # Production: HTTPS on :443 with manually-managed certs in ./certs/
+  #             (drop fullchain.pem + privkey.pem on the host before starting)
   nginx:
     image: nginx:alpine
     container_name: credepath-nginx
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/${NGINX_CONFIG:-nginx-staging.conf}:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
     depends_on:
       - frontend
       - backend
