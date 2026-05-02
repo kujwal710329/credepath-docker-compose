@@ -160,9 +160,48 @@ echo "==> Logging in to ECR..."
 aws ecr get-login-password --region "${AWS_REGION}" | \
   docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
-# ── Pull images and restart ───────────────────────────────────────────────────
+# ── Pull images ───────────────────────────────────────────────────────────────
 echo "==> Pulling images [tag: ${IMAGE_TAG}]..."
 docker compose -f "${DEPLOY_DIR}/docker-compose.yml" pull
+
+# ── Run Database Migrations ───────────────────────────────────────────────────
+echo "==> Running database migrations..."
+
+# Extract MongoDB URI from .env for the migration container
+MONGODB_URI_VALUE="$(grep '^MONGODB_URI=' "${DEPLOY_DIR}/.env" | cut -d= -f2-)"
+
+if [ -z "${MONGODB_URI_VALUE}" ]; then
+  echo "    ⚠️  WARNING: MONGODB_URI not found in .env"
+  echo "    Skipping migrations (database connection unavailable)"
+else
+  echo "    Image: ${ECR_REGISTRY}/${ENV_BACKEND_IMAGE}:${IMAGE_TAG}"
+  echo "    Command: npm run migrate:up"
+
+  # Run migrations in a temporary container
+  # Using --network host to ensure it can reach MongoDB (same as backend service)
+  docker run --rm \
+    --name credepath-migrations-runner \
+    --network host \
+    -e MONGODB_URI="${MONGODB_URI_VALUE}" \
+    -e NODE_ENV="${ENV_NODE_ENV}" \
+    "${ECR_REGISTRY}/${ENV_BACKEND_IMAGE}:${IMAGE_TAG}" \
+    npm run migrate:up
+
+  MIGRATION_EXIT_CODE=$?
+
+  if [ ${MIGRATION_EXIT_CODE} -eq 0 ]; then
+    echo "    ✅ Database migrations completed successfully"
+  else
+    echo "    ❌ Database migration failed with exit code: ${MIGRATION_EXIT_CODE}"
+    echo "    Aborting deployment to prevent data inconsistency"
+    echo ""
+    echo "    To troubleshoot:"
+    echo "      1. Check MongoDB connectivity: docker run --rm --network host ${ECR_REGISTRY}/${ENV_BACKEND_IMAGE}:${IMAGE_TAG} npm run migrate:status"
+    echo "      2. Check migration logs above for specific errors"
+    echo "      3. Verify MONGODB_URI is correct in GitHub secrets"
+    exit 1
+  fi
+fi
 
 echo "==> Restarting services..."
 docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d --remove-orphans

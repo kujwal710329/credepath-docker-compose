@@ -374,11 +374,20 @@ jobs:
             # STEP 5: Run Deployment Script
             # ═══════════════════════════════════════════════════════════════
             echo "==> [5/7] Executing deployment..."
+            echo ""
+            echo "    The deployment script will:"
+            echo "    1. Pull Docker images from ECR"
+            echo "    2. Run database migrations automatically"
+            echo "    3. Restart application containers"
+            echo ""
+            echo "    ⚠️  Deployment will abort if migrations fail (fail-safe)"
+            echo ""
 
             # Make deploy.sh executable
             chmod +x "${DEPLOY_DIR}/deploy.sh"
 
             # Run the deployment script with environment and tag
+            # Note: deploy.sh automatically runs database migrations before starting containers
             NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL}" \
               bash "${DEPLOY_DIR}/deploy.sh" "${DEPLOY_ENV}" "${IMAGE_TAG}"
 
