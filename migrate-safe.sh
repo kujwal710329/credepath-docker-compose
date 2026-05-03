@@ -64,7 +64,7 @@ S3_BACKUP_KEY="db-backups/${ENVIRONMENT}/${TIMESTAMP}_${IMAGE_TAG}.tar.gz"
 check_dependencies() {
   echo "==> [Step 0] Checking dependencies..."
   local missing=0
-  for tool in mongodump mongorestore aws docker; do
+  for tool in mongodump aws docker; do
     if ! command -v "${tool}" &>/dev/null; then
       echo "    ✗ Required tool not found: ${tool}"
       missing=1
@@ -180,25 +180,9 @@ step4_migrate_with_recovery() {
     docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d --remove-orphans
     echo "    Services online."
   else
-    echo "✗ Migration FAILED (exit code ${MIGRATION_EXIT_CODE}). Starting auto-rollback..."
-
-    echo "    Downloading snapshot from S3..."
-    aws s3 cp \
-      "s3://${AWS_BUCKET_NAME}/${S3_BACKUP_KEY}" \
-      /tmp/rollback_snapshot.tar.gz \
-      --region "${AWS_REGION}"
-
-    echo "    Restoring database from snapshot..."
-    mongorestore \
-      --uri "${MONGODB_URI}" \
-      --archive \
-      --gzip < /tmp/rollback_snapshot.tar.gz
-
-    echo "    Restarting services after rollback..."
-    docker compose -f "${DEPLOY_DIR}/docker-compose.yml" up -d --remove-orphans
-
-    rm -f /tmp/rollback_snapshot.tar.gz
-    echo "✗ Auto-rollback complete. Deploy aborted."
+    echo "✗ Migration FAILED (exit code ${MIGRATION_EXIT_CODE})."
+    echo "    Snapshot available at: s3://${AWS_BUCKET_NAME}/${S3_BACKUP_KEY}"
+    echo "    See ${DEPLOY_DIR}/rollback-plan.txt for manual restore instructions."
     exit 1
   fi
 }
