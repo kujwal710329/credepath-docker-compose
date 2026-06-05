@@ -22,6 +22,7 @@ services:
       JOB_RECOMMENDER_API_URL: ${JOB_RECOMMENDER_API_URL:-http://jobs-recommender:8000}
       MSG91_AUTH_KEY: ${MSG91_AUTH_KEY}
       MSG91_TEMPLATE_ID: ${MSG91_TEMPLATE_ID}
+      FRONTEND_URL: ${FRONTEND_URL}
     networks:
       - credepath-network
     
