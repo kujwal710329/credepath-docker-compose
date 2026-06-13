@@ -23,6 +23,7 @@ services:
       MSG91_AUTH_KEY: ${MSG91_AUTH_KEY}
       MSG91_TEMPLATE_ID: ${MSG91_TEMPLATE_ID}
       FRONTEND_URL: ${FRONTEND_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
     networks:
       - credepath-network
     
